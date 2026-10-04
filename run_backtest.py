@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
+"""
+Backtest calculator for divergence signals.
+
+Key fixes in this version:
+- Non-atomic deletion is removed; uses UPSERT to prevent data loss.
+- Look-ahead bias fixed: Trades enter on the NEXT session's open.
+- Tracks horizon completeness (trading sessions count).
+- Added pipeline_runs logging.
+"""
 
 import sqlite3
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import concurrent.futures
 import time
 import sys
@@ -13,13 +22,7 @@ BASE_DIR = Path(__file__).resolve().parent
 sys.path.append(str(BASE_DIR))
 
 from app.database import DatabaseManager
-
-def init_db():
-    db = DatabaseManager()
-    with db.connect() as conn:
-        # We clear the previous calculations
-        conn.execute("DELETE FROM backtest_results")
-        conn.commit()
+from app.engines.adjustment import AdjustmentService
 
 def fetch_instruments():
     db = DatabaseManager()
@@ -45,7 +48,7 @@ def process_instrument(args):
             
             # Load OHLC
             ohlc_query = """
-                SELECT date, open, high, low, close
+                SELECT date, open, high, low, close, yesterday, volume
                 FROM ohlcv_daily
                 WHERE instrument_id = ?
                 ORDER BY date
@@ -55,17 +58,28 @@ def process_instrument(args):
         if signals_df.empty or ohlc_df.empty:
             return instrument_id, []
 
+        # Adjust prices to prevent fake returns on splits/dividends
+        ohlc_df = AdjustmentService.adjust_prices(ohlc_df)
+        
+        # Use adjusted prices for backtest
+        ohlc_df['open'] = ohlc_df['adj_open']
+        ohlc_df['high'] = ohlc_df['adj_high']
+        ohlc_df['low'] = ohlc_df['adj_low']
+        ohlc_df['close'] = ohlc_df['adj_close']
+
         # Create mapping of date to integer index
         ohlc_df['idx'] = range(len(ohlc_df))
         date_to_idx = ohlc_df.set_index('date')['idx'].to_dict()
         
+        dates = ohlc_df['date'].values
+        opens = ohlc_df['open'].values
         closes = ohlc_df['close'].values
         highs = ohlc_df['high'].values
         lows = ohlc_df['low'].values
         
         total_rows = len(ohlc_df)
         
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         records = []
         
         for _, row in signals_df.iterrows():
@@ -78,27 +92,46 @@ def process_instrument(args):
             if sig_date not in date_to_idx:
                 continue
                 
-            entry_idx = date_to_idx[sig_date]
-            entry_price = closes[entry_idx]
+            sig_idx = date_to_idx[sig_date]
             
-            if entry_price <= 0:
+            # ENTRY ON NEXT SESSION (Fix for look-ahead bias)
+            entry_idx = sig_idx + 1
+            if entry_idx >= total_rows:
+                continue # Signal was on the last day, cannot enter trade yet
+                
+            entry_date = dates[entry_idx]
+            entry_price = opens[entry_idx]
+            
+            # Fallback if open price is missing/zero (sometimes happens in TSE)
+            if pd.isna(entry_price) or entry_price <= 0:
+                entry_price = closes[entry_idx]
+                
+            if pd.isna(entry_price) or entry_price <= 0:
                 continue
             
-            # Helper to safely calculate return
+            # Helper to calculate return based on trading sessions forward
             def get_return(forward_days):
                 target_idx = entry_idx + forward_days
-                if target_idx < total_rows:
+                is_complete = 1
+                
+                if target_idx >= total_rows:
+                    # Not enough days have passed, calculate based on latest available data
+                    target_idx = total_rows - 1
+                    is_complete = 0
+                    
+                if target_idx > entry_idx:
                     price = closes[target_idx]
                     if is_bullish:
-                        return (price - entry_price) / entry_price
+                        ret = (price - entry_price) / entry_price
                     else:
-                        return (entry_price - price) / entry_price
-                return None
+                        ret = (entry_price - price) / entry_price
+                    return float(ret), is_complete
+                return None, 0
 
-            ret_5d = get_return(5)
-            ret_10d = get_return(10)
-            ret_20d = get_return(20)
-            ret_30d = get_return(30)
+            ret_5d, comp_5d = get_return(5)
+            ret_10d, comp_10d = get_return(10)
+            ret_20d, comp_20d = get_return(20)
+            ret_30d, comp_30d = get_return(30)
             
             # Calculate 30-day MFE and MAE
             mfe_30d = None
@@ -113,11 +146,11 @@ def process_instrument(args):
                 min_low = np.nanmin(window_lows)
                 
                 if is_bullish:
-                    mfe_30d = (max_high - entry_price) / entry_price
-                    mae_30d = (min_low - entry_price) / entry_price
+                    mfe_30d = float((max_high - entry_price) / entry_price)
+                    mae_30d = float((min_low - entry_price) / entry_price)
                 else:
-                    mfe_30d = (entry_price - min_low) / entry_price
-                    mae_30d = (entry_price - max_high) / entry_price
+                    mfe_30d = float((entry_price - min_low) / entry_price)
+                    mae_30d = float((entry_price - max_high) / entry_price)
 
             records.append((
                 signal_id,
@@ -125,13 +158,13 @@ def process_instrument(args):
                 sig_date,
                 indicator,
                 div_type,
+                entry_date,
                 float(entry_price),
-                float(ret_5d) if ret_5d is not None else None,
-                float(ret_10d) if ret_10d is not None else None,
-                float(ret_20d) if ret_20d is not None else None,
-                float(ret_30d) if ret_30d is not None else None,
-                float(mfe_30d) if mfe_30d is not None else None,
-                float(mae_30d) if mae_30d is not None else None,
+                'next_open',
+                ret_5d, ret_10d, ret_20d, ret_30d,
+                mfe_30d, mae_30d,
+                comp_5d, comp_10d, comp_20d, comp_30d,
+                0.0, # Transaction cost
                 now
             ))
 
@@ -146,7 +179,17 @@ def main():
     print("=" * 60)
     
     start_time = time.time()
-    init_db()
+    
+    # Record pipeline run
+    run_id = f"backtest_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    db = DatabaseManager()
+    with db.connect() as conn:
+        conn.execute("""
+            INSERT INTO pipeline_runs (run_id, stage, status, started_at)
+            VALUES (?, 'backtest', 'running', ?)
+        """, (run_id, datetime.now(timezone.utc).isoformat()))
+        conn.commit()
+        
     instruments = fetch_instruments()
     
     print(f"Total instruments to process: {len(instruments)}")
@@ -154,6 +197,7 @@ def main():
     all_records = []
     success = 0
     failed = 0
+    empty = 0
     
     with concurrent.futures.ProcessPoolExecutor() as executor:
         futures = {executor.submit(process_instrument, ins): ins for ins in instruments}
@@ -168,40 +212,97 @@ def main():
                     print(f"[{i:03d}/{len(instruments)}] {symbol:<15} ERROR: {result}")
                     failed += 1
                 else:
-                    all_records.extend(result)
-                    success += 1
-                    print(f"[{i:03d}/{len(instruments)}] {symbol:<15} OK | {len(result)} backtest rows")
+                    if not result:
+                        empty += 1
+                        print(f"[{i:03d}/{len(instruments)}] {symbol:<15} OK | 0 rows")
+                    else:
+                        all_records.extend(result)
+                        success += 1
+                        print(f"[{i:03d}/{len(instruments)}] {symbol:<15} OK | {len(result)} backtest rows")
             except Exception as e:
                 print(f"[{i:03d}/{len(instruments)}] {symbol:<15} FATAL ERROR: {e}")
                 failed += 1
                 
-    # Bulk insert
-    print("\\nInserting backtest records into database...")
+    inserted_count = 0
     if all_records:
-        db = DatabaseManager()
+        print(f"\nInserting {len(all_records)} backtest records into database (UPSERT)...")
         with db.connect() as conn:
-            # Batch insert to handle SQLite limits
-            batch_size = 50000
-            for i in range(0, len(all_records), batch_size):
-                batch = all_records[i:i + batch_size]
-                conn.executemany("""
-                    INSERT INTO backtest_results (
-                        signal_id, instrument_id, signal_date, indicator, divergence_type,
-                        entry_price, return_5d, return_10d, return_20d, return_30d,
-                        mfe_30d, mae_30d, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, batch)
-            
-            conn.commit()
+            # Batch insert to handle SQLite limits, using UPSERT on signal_id
+            batch_size = 10000
+            try:
+                for i in range(0, len(all_records), batch_size):
+                    batch = all_records[i:i + batch_size]
+                    # We rely on UNIQUE (signal_id) in backtest_results to DO UPDATE
+                    cursor = conn.executemany("""
+                        INSERT INTO backtest_results (
+                            signal_id, instrument_id, signal_date, indicator, divergence_type,
+                            entry_date, entry_price, entry_type,
+                            return_5d, return_10d, return_20d, return_30d,
+                            mfe_30d, mae_30d,
+                            horizon_5d_complete, horizon_10d_complete, horizon_20d_complete, horizon_30d_complete,
+                            transaction_cost, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(signal_id) DO UPDATE SET
+                            entry_date = excluded.entry_date,
+                            entry_price = excluded.entry_price,
+                            return_5d = excluded.return_5d,
+                            return_10d = excluded.return_10d,
+                            return_20d = excluded.return_20d,
+                            return_30d = excluded.return_30d,
+                            mfe_30d = excluded.mfe_30d,
+                            mae_30d = excluded.mae_30d,
+                            horizon_5d_complete = excluded.horizon_5d_complete,
+                            horizon_10d_complete = excluded.horizon_10d_complete,
+                            horizon_20d_complete = excluded.horizon_20d_complete,
+                            horizon_30d_complete = excluded.horizon_30d_complete,
+                            created_at = excluded.created_at
+                    """, batch)
+                    inserted_count += cursor.rowcount
+                
+                conn.commit()
+                print(f"Upserted records.")
+            except Exception as e:
+                print(f"ERROR during bulk upsert: {e}")
+                failed += 1
+                
+    # Clean very old backtests (> 180 days) after successful execution
+    if inserted_count > 0 or (not all_records and failed == 0):
+        with db.connect() as conn:
+            old_count = conn.execute(
+                "SELECT COUNT(*) FROM backtest_results WHERE signal_date < date('now', '-180 days')"
+            ).fetchone()[0]
+            if old_count > 0:
+                conn.execute("DELETE FROM backtest_results WHERE signal_date < date('now', '-180 days')")
+                conn.commit()
+                print(f"Cleaned {old_count} backtests older than 180 days.")
+
+    # Update pipeline run record
+    with db.connect() as conn:
+        status = 'success' if failed == 0 else ('partial' if success > 0 else 'failed')
+        conn.execute("""
+            UPDATE pipeline_runs SET 
+                status = ?, finished_at = ?,
+                total_instruments = ?, success_count = ?, 
+                failed_count = ?, skipped_count = ?,
+                records_created = ?
+            WHERE run_id = ?
+        """, (
+            status, datetime.now(timezone.utc).isoformat(),
+            success + empty + failed, success, failed, empty,
+            inserted_count, run_id
+        ))
+        conn.commit()
 
     elapsed = time.time() - start_time
     print("=" * 60)
     print("FINISHED")
     print("=" * 60)
-    print(f"Success             : {success}")
-    print(f"Failed              : {failed}")
-    print(f"Total rows saved    : {len(all_records)}")
-    print(f"Time elapsed        : {elapsed:.2f} seconds")
+    print(f"Processed instruments : {success + empty + failed}")
+    print(f"Success               : {success}")
+    print(f"Failed                : {failed}")
+    print(f"Total rows updated    : {len(all_records)}")
+    print(f"Time elapsed          : {elapsed:.2f} seconds")
+    print(f"Status                : {status}")
 
 if __name__ == "__main__":
     main()

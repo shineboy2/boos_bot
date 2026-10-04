@@ -10,25 +10,29 @@ def generate_market_map(output_path: str = None) -> str:
     """
     Generates a treemap representing the TSETMC market map based on trade value and price change.
     """
-    url_bourse = "http://cdn.tsetmc.com/api/MarketMap/GetMarketMapData/1"
-    url_fara = "http://cdn.tsetmc.com/api/MarketMap/GetMarketMapData/2"
+    url_bourse = "https://cdn.tsetmc.com/api/MarketMap/GetMarketMapData/1"
+    url_fara = "https://cdn.tsetmc.com/api/MarketMap/GetMarketMapData/2"
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"
-    }
+    from config import DEFAULT_HEADERS
     
     from tenacity import retry, stop_after_attempt, wait_exponential
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def fetch_data(url):
-        return requests.get(url, headers=headers, timeout=15).json()
+        r = requests.get(url, headers=DEFAULT_HEADERS, timeout=15)
+        if r.status_code != 200:
+            raise RuntimeError(f"TSETMC returned status {r.status_code}")
+        try:
+            return r.json()
+        except Exception:
+            raise RuntimeError(f"TSETMC returned invalid JSON. Possibly blocked by Cloudflare. Response length: {len(r.text)}")
         
     try:
         r1 = fetch_data(url_bourse)
         r2 = fetch_data(url_fara)
         data = r1 + r2
     except Exception as e:
-        raise RuntimeError(f"Failed to fetch market map data from TSETMC after retries: {e}")
+        raise RuntimeError(f"خطا در ارتباط با سرور TSETMC (ممکن است IP مسدود شده باشد): {e}")
 
     records = []
     for item in data:

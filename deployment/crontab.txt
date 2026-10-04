@@ -1,0 +1,2 @@
+# Run daily pipeline every day at 16:30 (after Tehran market closes)
+30 16 * * 6,0,1,2,3 cd /home/shahab/api && /home/shahab/api/.venv/bin/python daily_pipeline.py >> /home/shahab/api/data/cron.log 2>&1

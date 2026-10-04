@@ -116,30 +116,77 @@ async def send_daily_report():
         except Exception as e:
             logger.error(f"Failed to broadcast best signals: {e}")
 
+def record_pipeline_step(step_name: str, status: str, run_date: str = None):
+    db = DatabaseManager()
+    if not run_date:
+        run_date = datetime.now().strftime("%Y-%m-%d")
+        
+    run_id = f"{run_date}_{step_name}"
+        
+    with db.connect() as conn:
+        conn.execute("""
+            INSERT INTO pipeline_runs (run_id, stage, status, market_date, started_at, finished_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                status = excluded.status,
+                finished_at = CASE WHEN excluded.status = 'completed' THEN excluded.finished_at ELSE finished_at END
+        """, (run_id, step_name, status, run_date, datetime.now().isoformat(), datetime.now().isoformat() if status == 'completed' else None))
+        conn.commit()
+
+def is_step_completed(step_name: str, run_date: str = None) -> bool:
+    db = DatabaseManager()
+    if not run_date:
+        run_date = datetime.now().strftime("%Y-%m-%d")
+        
+    run_id = f"{run_date}_{step_name}"
+    
+    with db.connect() as conn:
+        cur = conn.execute("SELECT status FROM pipeline_runs WHERE run_id = ?", (run_id,))
+        row = cur.fetchone()
+        return row and row['status'] == 'completed'
+
+def run_step(step_name: str, script_path: str, force: bool = False):
+    if not force and is_step_completed(step_name):
+        logger.info(f"Step {step_name} already completed today. Skipping.")
+        return True
+        
+    logger.info(f"Running {step_name}...")
+    record_pipeline_step(step_name, "running")
+    
+    res = subprocess.run([sys.executable, str(script_path)])
+    
+    if res.returncode == 0:
+        record_pipeline_step(step_name, "completed")
+        return True
+    else:
+        record_pipeline_step(step_name, "failed")
+        logger.error(f"{step_name} failed!")
+        return False
+
 def main():
     logger.info("Starting Daily Pipeline...")
     start_time = time.time()
+    force = '--force' in sys.argv
     
-    # 1. Update Today
-    logger.info("Running update_today.py...")
-    res = subprocess.run([sys.executable, str(BASE_DIR / "update_today.py")])
-    if res.returncode != 0:
-        logger.error("update_today.py failed!")
-        return
-        
-    # 2. Calculate Signals
-    logger.info("Running calculate_signals.py...")
-    res = subprocess.run([sys.executable, str(BASE_DIR / "calculate_signals.py")])
-    if res.returncode != 0:
-        logger.error("calculate_signals.py failed!")
-        return
-        
-    # 3. Send Telegram Reports
-    logger.info("Sending Telegram Reports...")
-    asyncio.run(send_daily_report())
+    steps = [
+        ("update_today", BASE_DIR / "update_today.py"),
+        ("calculate_signals", BASE_DIR / "calculate_signals.py"),
+        ("run_backtest", BASE_DIR / "run_backtest.py"),
+    ]
+    
+    for step_name, script_path in steps:
+        if not run_step(step_name, script_path, force):
+            return
+            
+    # 4. Send Telegram Reports
+    if run_step("send_reports", BASE_DIR / "daily_pipeline.py", force=True): # Just a placeholder since it's inline
+        logger.info("Sending Telegram Reports...")
+        asyncio.run(send_daily_report())
+        record_pipeline_step("send_reports", "completed")
     
     elapsed = time.time() - start_time
     logger.info(f"Daily Pipeline finished in {elapsed:.2f} seconds.")
 
 if __name__ == "__main__":
-    main()
+    if "send_reports" not in sys.argv:
+        main()

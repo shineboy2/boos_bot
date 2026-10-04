@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -41,6 +41,7 @@ def map_info_row(row):
         "low": to_float(row.get("priceMin")),
         "close": to_float(row.get("pClosing")),
         "last": to_float(row.get("pDrCotVal")),
+        "yesterday": to_float(row.get("priceYesterday")),
         "volume": to_int(row.get("qTotTran5J")),
         "value": to_int(row.get("qTotCap")),
         "trade_count": to_int(row.get("zTotTran")),
@@ -72,7 +73,7 @@ def main():
     
     with db.connect() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, ins_code, symbol FROM instruments WHERE active = 1")
+        cursor.execute("SELECT id, ins_code, symbol FROM instruments WHERE active = 1 AND instrument_type IN ('stock', 'etf', 'right')")
         instruments = cursor.fetchall()
         
         session = requests.Session()
@@ -103,19 +104,20 @@ def main():
                     continue
                     
                 parsed = map_info_row(info)
-                fetched_at = datetime.utcnow().isoformat()
+                fetched_at = datetime.now(timezone.utc).isoformat()
                 
                 conn.execute("""
                     INSERT INTO ohlcv_daily (
-                        instrument_id, date, open, high, low, close, last, 
+                        instrument_id, date, open, high, low, close, last, yesterday, 
                         volume, value, trade_count, source, fetched_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(instrument_id, date) DO UPDATE SET
                         open = excluded.open,
                         high = excluded.high,
                         low = excluded.low,
                         close = excluded.close,
                         last = excluded.last,
+                        yesterday = excluded.yesterday,
                         volume = excluded.volume,
                         value = excluded.value,
                         trade_count = excluded.trade_count,
@@ -123,7 +125,7 @@ def main():
                         fetched_at = excluded.fetched_at
                 """, (
                     inst_id, parsed["date"], parsed["open"], parsed["high"], parsed["low"],
-                    parsed["close"], parsed["last"], parsed["volume"], parsed["value"],
+                    parsed["close"], parsed["last"], parsed["yesterday"], parsed["volume"], parsed["value"],
                     parsed["trade_count"], "tsetmc_fast", fetched_at
                 ))
                 conn.commit()

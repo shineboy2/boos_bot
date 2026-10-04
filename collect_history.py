@@ -2,11 +2,13 @@
 
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import sys
 from pathlib import Path
+import concurrent.futures
+import threading
 
 # Add project root to path
 BASE_DIR = Path(__file__).resolve().parent
@@ -23,7 +25,6 @@ INSTRUMENTS_FILE = DATA_DIR / "instruments.json"
 
 TSETMC_BASE_URL = "https://cdn.tsetmc.com/api"
 REQUEST_TIMEOUT = 30
-SLEEP_BETWEEN_REQUESTS = 0.05
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -60,31 +61,60 @@ def map_history_row(row):
         "low": to_float(row.get("priceMin")),
         "close": to_float(row.get("pClosing")),
         "last": to_float(row.get("pDrCotVal")),
+        "yesterday": to_float(row.get("priceYesterday")),
         "volume": to_int(row.get("qTotTran5J")),
         "value": to_int(row.get("qTotCap")),
         "trade_count": to_int(row.get("zTotTran")),
     }
 
 def load_instruments():
-    if not INSTRUMENTS_FILE.exists():
-        raise FileNotFoundError(f"Instrument file not found:\n{INSTRUMENTS_FILE}")
-    with open(INSTRUMENTS_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if isinstance(data, dict):
-        if "instruments" in data:
-            instruments = data["instruments"]
-        elif "data" in data:
-            instruments = data["data"]
-        else:
-            raise ValueError("JSON must contain 'instruments' or 'data'")
-    elif isinstance(data, list):
-        instruments = data
-    else:
-        raise ValueError("Invalid instruments.json format")
+    db = DatabaseManager()
+    with db.connect() as conn:
+        cur = conn.execute("""
+            SELECT id, ins_code, ins_id, symbol, name, isin, market, market_board, instrument_type
+            FROM instruments
+            WHERE active = 1 AND instrument_type IN ('stock', 'etf', 'right')
+        """)
+        
+        instruments = []
+        for row in cur.fetchall():
+            instruments.append({
+                "id": row['id'],
+                "ins_code": row['ins_code'],
+                "ins_id": row['ins_id'],
+                "symbol": row['symbol'],
+                "name": row['name'],
+                "isin": row['isin'],
+                "market": row['market'],
+                "market_board": row['market_board'],
+                "instrument_type": row['instrument_type']
+            })
+            
     return instruments
 
+
+def process_instrument(instrument, thread_local_session):
+    time.sleep(0.1)  # Prevent sudden bursts to TSETMC
+    ins_code = str(instrument.get("ins_code") or instrument.get("insCode"))
+    symbol = (instrument.get("symbol") or instrument.get("lVal18AFC") or instrument.get("lVal18"))
+    
+    try:
+        if not hasattr(thread_local_session, "session"):
+            thread_local_session.session = requests.Session()
+            thread_local_session.session.headers.update(HEADERS)
+            
+        rows = fetch_history(thread_local_session.session, ins_code)
+        
+        parsed_rows = []
+        for row in rows:
+            parsed_rows.append(map_history_row(row))
+            
+        return instrument, parsed_rows, None
+    except Exception as exc:
+        return instrument, None, exc
+
 def upsert_instrument(conn, instrument):
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     ins_code = str(instrument.get("ins_code") or instrument.get("insCode"))
     ins_id = (instrument.get("ins_id") or instrument.get("insID") or instrument.get("instrumentID"))
     symbol = (instrument.get("symbol") or instrument.get("lVal18AFC") or instrument.get("lVal18"))
@@ -93,18 +123,12 @@ def upsert_instrument(conn, instrument):
     isin = (instrument.get("isin") or instrument.get("cIsin"))
     market = (instrument.get("market") or instrument.get("flowTitle"))
     market_board = (instrument.get("market_board") or instrument.get("cgrValCotTitle"))
-
-    if not ins_code or ins_code == "None":
-        raise ValueError(f"Invalid ins_code: {instrument}")
-    if not ins_id:
-        raise ValueError(f"Invalid ins_id: {instrument}")
-    if not symbol:
-        raise ValueError(f"Invalid symbol: {instrument}")
+    instrument_type = instrument.get("instrument_type", "stock")
 
     conn.execute("""
         INSERT INTO instruments (
-            ins_code, ins_id, isin, symbol, name, market, market_board, active, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            ins_code, ins_id, isin, symbol, name, market, market_board, instrument_type, active, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
         ON CONFLICT(ins_code) DO UPDATE SET
             ins_id = excluded.ins_id,
             isin = excluded.isin,
@@ -112,40 +136,40 @@ def upsert_instrument(conn, instrument):
             name = excluded.name,
             market = excluded.market,
             market_board = excluded.market_board,
+            instrument_type = excluded.instrument_type,
             updated_at = excluded.updated_at
-    """, (ins_code, ins_id, isin, symbol, name, market, market_board, now, now))
+    """, (ins_code, ins_id, isin, symbol, name, market, market_board, instrument_type, now, now))
     
     row = conn.execute("SELECT id FROM instruments WHERE ins_code = ?", (ins_code,)).fetchone()
     return row['id']
 
-def save_history(conn, instrument_id, rows):
-    fetched_at = datetime.utcnow().isoformat()
+def save_history(conn, instrument_id, parsed_rows):
+    fetched_at = datetime.now(timezone.utc).isoformat()
     records = []
-    for row in rows:
-        parsed = map_history_row(row)
+    for parsed in parsed_rows:
         records.append((
             instrument_id, parsed["date"], parsed["open"], parsed["high"], parsed["low"],
-            parsed["close"], parsed["last"], parsed["volume"], parsed["value"],
+            parsed["close"], parsed["last"], parsed["yesterday"], parsed["volume"], parsed["value"],
             parsed["trade_count"], "tsetmc", fetched_at,
         ))
 
     conn.executemany("""
         INSERT INTO ohlcv_daily (
-            instrument_id, date, open, high, low, close, last, volume, value, trade_count, source, fetched_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            instrument_id, date, open, high, low, close, last, yesterday, volume, value, trade_count, source, fetched_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(instrument_id, date) DO UPDATE SET
             open = excluded.open,
             high = excluded.high,
             low = excluded.low,
             close = excluded.close,
             last = excluded.last,
+            yesterday = excluded.yesterday,
             volume = excluded.volume,
             value = excluded.value,
             trade_count = excluded.trade_count,
             source = excluded.source,
             fetched_at = excluded.fetched_at
     """, records)
-    conn.commit()
     return len(records)
 
 def main():
@@ -153,53 +177,63 @@ def main():
     instruments = load_instruments()
 
     logger.info("=" * 60)
-    logger.info("TSETMC DAILY HISTORY COLLECTOR")
+    logger.info("TSETMC DAILY HISTORY COLLECTOR (MULTITHREADED)")
     logger.info("=" * 60)
     logger.info(f"Instrument file : {INSTRUMENTS_FILE}")
     logger.info(f"Total instruments: {len(instruments)}")
     
     db = DatabaseManager()
+    
+    thread_local = threading.local()
 
-    with db.connect() as conn:
-        session = requests.Session()
-        session.headers.update(HEADERS)
+    success = 0
+    failed = 0
+    total_rows = 0
+    
+    start_time = time.time()
 
-        success = 0
-        failed = 0
-        total_rows = 0
+    # Use 4 workers to avoid TSETMC rate limits/hanging
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(process_instrument, inst, thread_local): inst for inst in instruments}
+        
+        with db.connect() as conn:
+            for i, future in enumerate(concurrent.futures.as_completed(futures), 1):
+                instrument, parsed_rows, exc = future.result()
+                symbol = (instrument.get("symbol") or instrument.get("lVal18AFC") or instrument.get("lVal18"))
+                ins_code = str(instrument.get("ins_code") or instrument.get("insCode"))
 
-        for index, instrument in enumerate(instruments, start=1):
-            symbol = (instrument.get("symbol") or instrument.get("lVal18AFC") or instrument.get("lVal18"))
-            ins_code = str(instrument.get("ins_code") or instrument.get("insCode"))
-
-            logger.info(f"[{index:03d}/{len(instruments)}] {symbol:<15} {ins_code}")
-
-            try:
-                instrument_id = upsert_instrument(conn, instrument)
-                rows = fetch_history(session, ins_code)
-                count = save_history(conn, instrument_id, rows)
-
-                success += 1
-                total_rows += count
-
-                if rows:
-                    dates = [parse_date(row["dEven"]) for row in rows]
-                    logger.info(f"OK | {count} rows | {min(dates)} -> {max(dates)}")
+                if exc:
+                    failed += 1
+                    logger.error(f"[{i:03d}/{len(instruments)}] ERROR {symbol:<15} | {type(exc).__name__}: {exc}")
                 else:
-                    logger.info("OK | 0 rows")
+                    try:
+                        instrument_id = instrument.get("id")
+                        count = save_history(conn, instrument_id, parsed_rows)
+                        conn.commit()
+                        
+                        success += 1
+                        total_rows += count
 
-            except Exception as exc:
-                failed += 1
-                logger.error(f"ERROR | {type(exc).__name__}: {exc}")
+                        if parsed_rows:
+                            dates = [row["date"] for row in parsed_rows]
+                            logger.info(f"[{i:03d}/{len(instruments)}] OK | {symbol:<15} | {count} rows | {min(dates)} -> {max(dates)}")
+                        else:
+                            logger.info(f"[{i:03d}/{len(instruments)}] OK | {symbol:<15} | 0 rows")
 
-            time.sleep(SLEEP_BETWEEN_REQUESTS)
+                    except Exception as e:
+                        failed += 1
+                        logger.error(f"[{i:03d}/{len(instruments)}] DB ERROR {symbol:<15} | {e}")
+                        conn.rollback()
 
-        logger.info("=" * 60)
-        logger.info("FINISHED")
-        logger.info(f"Success instruments : {success}")
-        logger.info(f"Failed instruments  : {failed}")
-        logger.info(f"Total history rows  : {total_rows}")
-
+    elapsed = time.time() - start_time
+    logger.info("=" * 60)
+    logger.info("FINISHED")
+    logger.info(f"Success instruments : {success}")
+    logger.info(f"Failed instruments  : {failed}")
+    logger.info(f"Total history rows  : {total_rows}")
+    logger.info(f"Time elapsed        : {elapsed:.2f}s")
+    
+    with db.connect() as conn:
         count_instruments = conn.execute("SELECT COUNT(*) FROM instruments").fetchone()[0]
         count_history = conn.execute("SELECT COUNT(*) FROM ohlcv_daily").fetchone()[0]
         logger.info(f"DB instruments      : {count_instruments}")
