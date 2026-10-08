@@ -32,7 +32,7 @@ def generate_daily_scores(db: DatabaseManager = None):
         vol_query = """
             WITH Ranked AS (
                 SELECT i.id as instrument_id, o.volume, o.date,
-                       AVG(o.volume) OVER (PARTITION BY i.id ORDER BY o.date ROWS BETWEEN 30 PRECEDING AND 1 PRECEDING) as avg_vol
+                       AVG(o.volume) OVER (PARTITION BY i.id ORDER BY o.date ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING) as avg_vol
                 FROM instruments i
                 JOIN ohlcv_daily o ON i.id = o.instrument_id
                 WHERE i.active = 1 AND i.instrument_type = 'stock'

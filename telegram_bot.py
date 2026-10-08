@@ -160,15 +160,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if price_yesterday > 0:
             yesterday_close = price_yesterday
+        elif 'yesterday' in latest and pd.notna(latest['yesterday']) and latest['yesterday'] > 0:
+            yesterday_close = float(latest['yesterday'])
         elif len(df) > 1:
-            from datetime import timezone, timedelta
-            tehran_tz = timezone(timedelta(hours=3, minutes=30))
-            today_str = datetime.now(tehran_tz).strftime('%Y-%m-%d')
-            last_date = str(df.iloc[-1]['date']).split(' ')[0]
-            if last_date == today_str:
-                yesterday_close = float(df.iloc[-2]['close'])
-            else:
-                yesterday_close = float(df.iloc[-1]['close'])
+            yesterday_close = float(df.iloc[-2]['close'])
         else:
             yesterday_close = close_price
         
@@ -178,7 +173,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         close_str = f"{close_diff:+.2f}%"
         last_str = f"{last_diff:+.2f}%"
         
-        avg_volume_30d = df['volume'].tail(30).mean()
+        avg_volume_30d = df['volume'].tail(21).mean()
         suspicious_volume = volume > (3 * avg_volume_30d)
         
         rsi = f"{latest['rsi']:.1f}" if pd.notna(latest['rsi']) else "N/A"

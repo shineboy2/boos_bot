@@ -62,7 +62,7 @@ class ScannerService:
         sql = """
         WITH Ranked AS (
             SELECT i.ins_code, i.symbol, o.volume, o.date,
-                   AVG(o.volume) OVER (PARTITION BY i.id ORDER BY o.date ROWS BETWEEN 30 PRECEDING AND 1 PRECEDING) as avg_vol
+                   AVG(o.volume) OVER (PARTITION BY i.id ORDER BY o.date ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING) as avg_vol
             FROM instruments i
             JOIN ohlcv_daily o ON i.id = o.instrument_id
             WHERE i.active = 1
