@@ -26,7 +26,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /update - منوی دریافت داده و بروزرسانی قیمت‌ها\n"
         "• /today - مشاهده بهترین سیگنال‌های واگرایی امروز\n"
         "• /scans - لیست فیلترهای هوشمند بازار\n"
-        "• /scan - اجرای اسکنر کامل بازار (محاسبات سنگین)\n\n"
+        "• /scan - اجرای اسکنر کامل بازار (محاسبات سنگین)\n"
+        "• /marketmap - رسم نقشه زنده بازار\n\n"
         "<b>مدیریت واچ‌لیست و پورتفو:</b>\n"
         "• /portfolio - مشاهده پوزیشن‌های باز و سود/زیان\n"
         "• /watchlist - مشاهده نمادهای مورد علاقه شما\n"
@@ -49,7 +50,9 @@ async def filters_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🚀 مستعد صف خرید فردا", callback_data="scan_queue")],
         [InlineKeyboardButton("⚖️ لیست حق تقدم‌ها", callback_data="scan_rights")],
         [InlineKeyboardButton("💼 صندوق‌های قابل معامله", callback_data="scan_etfs")],
-        [InlineKeyboardButton("🕯️ کندل‌های مستعد رشد (چکش/ماروبوزو)", callback_data="scan_candles")]
+        [InlineKeyboardButton("🕯️ کندل‌های مستعد رشد (چکش/ماروبوزو)", callback_data="scan_candles")],
+        [InlineKeyboardButton("🏆 صنایع پیشتاز (یک ماهه)", callback_data="scan_top_sectors")],
+        [InlineKeyboardButton("📊 جامانده‌های گروه‌های پیشتاز", callback_data="scan_lagging_stocks")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("🔎 <b>فیلترهای هوشمند بازار</b>\nیک مورد را انتخاب کنید:", reply_markup=reply_markup, parse_mode=ParseMode.HTML)
@@ -59,7 +62,29 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Fetching latest signals from database...", parse_mode=ParseMode.HTML)
     latest_date, signals_by_symbol = get_latest_signals()
     message = format_signals_message(latest_date, signals_by_symbol)
-    await update.message.reply_text(message, parse_mode=ParseMode.HTML)
+    
+    # Split message if it exceeds 4096 chars (Telegram limit)
+    chunk_size = 4000
+    if len(message) <= chunk_size:
+        await update.message.reply_text(message, parse_mode=ParseMode.HTML)
+    else:
+        # Split safely by newline
+        parts = []
+        current_part = ""
+        for line in message.split('\n'):
+            if len(current_part) + len(line) + 1 > chunk_size:
+                parts.append(current_part)
+                current_part = line + '\n'
+            else:
+                current_part += line + '\n'
+        if current_part:
+            parts.append(current_part)
+            
+        for i, part in enumerate(parts):
+            if i == 0:
+                await update.message.reply_text(part, parse_mode=ParseMode.HTML)
+            else:
+                await update.message.reply_text(f"(ادامه...)\n\n{part}", parse_mode=ParseMode.HTML)
 
 @restricted
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):

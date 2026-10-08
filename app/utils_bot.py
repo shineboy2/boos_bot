@@ -70,7 +70,7 @@ def format_signals_message(latest_date, signals_by_symbol):
         
     confluence_signals = {}
     quality_signals = {}
-    other_signals_count = 0
+    other_signals = {}
     
     for symbol, indicators_set in signals_by_symbol.items():
         indicators = sorted(list(indicators_set))
@@ -80,39 +80,33 @@ def format_signals_message(latest_date, signals_by_symbol):
         elif "MACD" in indicators[0] or "OBV" in indicators[0]:
             quality_signals[symbol] = indicators
         else:
-            other_signals_count += 1
+            other_signals[symbol] = indicators
             
     msg = [f"📅 <b>Latest Signals for {latest_date}</b>\n"]
     
     if confluence_signals:
         msg.append("⭐⭐⭐ <b>High Probability (Confluence)</b>")
         msg.append("<i>(Multiple indicators triggered on the same day)</i>")
-        count = 0
         for symbol, indicators in confluence_signals.items():
-            if count >= 40:
-                msg.append(f"<i>... و {len(confluence_signals) - 40} نماد دیگر</i>")
-                break
             inds_str = ", ".join(indicators)
             msg.append(f"🟢 <b>{symbol}</b>: {inds_str}")
-            count += 1
         msg.append("\n")
         
     if quality_signals:
         msg.append("⭐ <b>Quality Bullish Signals</b>")
         msg.append("<i>(Strong individual indicators: MACD & OBV)</i>")
-        count = 0
         for symbol, indicators in quality_signals.items():
-            if count >= 40:
-                msg.append(f"<i>... و {len(quality_signals) - 40} نماد دیگر</i>")
-                break
             msg.append(f"🔹 <b>{symbol}</b>: {indicators[0]}")
-            count += 1
         msg.append("\n")
         
-    if not confluence_signals and not quality_signals:
-        msg.append("No confluence or quality MACD/OBV signals found today.\n")
+    if not confluence_signals and not quality_signals and not other_signals:
+        msg.append("No bullish signals found today.\n")
         
-    if other_signals_count > 0:
-        msg.append(f"<i>Plus {other_signals_count} other symbols with single RSI/Stochastic signals (hidden for brevity).</i>")
+    if other_signals:
+        msg.append("⚪ <b>Other Signals</b>")
+        msg.append("<i>(Single RSI/Stochastic signals)</i>")
+        for symbol, indicators in other_signals.items():
+            msg.append(f"🔸 <b>{symbol}</b>: {indicators[0]}")
+        msg.append("\n")
         
     return "\n".join(msg)
