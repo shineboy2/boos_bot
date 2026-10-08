@@ -34,14 +34,8 @@ URL = (
     "&RefID=0"
 )
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/153.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json",
-}
+from config import DEFAULT_HEADERS
+HEADERS = DEFAULT_HEADERS
 
 def determine_instrument_type(ins_id: str, symbol: str, name: str) -> str:
     if not ins_id or len(ins_id) < 12:
@@ -84,6 +78,63 @@ def get_market_name(ins_id: str) -> str:
     return prefixes.get(prefix, f"سایر ({prefix})")
 
 
+TSE_SECTORS = {
+    "10": "استخراج زغال سنگ",
+    "11": "کشاورزی، دامپروری",
+    "13": "استخراج کانه های فلزی",
+    "14": "استخراج سایر معادن",
+    "17": "منسوجات",
+    "19": "دباغی، پرداخت چرم و ساخت انواع پاپوش",
+    "20": "محصولات چوبی",
+    "21": "محصولات کاغذی",
+    "22": "انتشار، چاپ و تکثیر",
+    "23": "فراورده های نفتی، کک و سوخت هسته ای",
+    "25": "لاستیک و پلاستیک",
+    "26": "تولید محصولات کامپیوتری الکترونیکی ونوری",
+    "27": "فلزات اساسی",
+    "28": "ساخت محصولات فلزی",
+    "29": "ماشین آلات و تجهیزات",
+    "31": "ماشین آلات و دستگاه‌های برقی",
+    "32": "ساخت دستگاه‌ها و وسایل ارتباطی",
+    "33": "ابزارپزشکی، اپتیکی و اندازه گیری",
+    "34": "خودرو و ساخت قطعات",
+    "35": "سایر وسایل نقلیه",
+    "36": "مبلمان و مصنوعات دیگر",
+    "38": "قند و شکر",
+    "39": "شرکت های چند رشته ای صنعتی",
+    "40": "عرضه برق، گاز، بخار و آب گرم",
+    "42": "ساخت رادیو، تلویزیون و دستگاه‌ها و وسایل ارتباطی",
+    "43": "انبوه سازی، املاک و مستغلات",
+    "44": "محصولات شیمیایی",
+    "45": "پیمانکاری صنعتی",
+    "47": "تجارت خرده فروشی",
+    "49": "حمل و نقل، انبارداری و ارتباطات",
+    "50": "خرده فروشی",
+    "53": "سیمان، آهک و گچ",
+    "54": "کاشی و سرامیک",
+    "55": "هتل و رستوران",
+    "56": "سرمایه گذاری ها",
+    "57": "بانک ها و موسسات اعتباری",
+    "58": "سایر واسطه گریهای مالی",
+    "59": "بیمه و صندوق بازنشستگی به جز تامین اجتماعی",
+    "60": "فعالیتهای کمکی به نهادهای مالی واسط",
+    "61": "صندوق سرمایه گذاری قابل معامله",
+    "64": "مخابرات",
+    "65": "فعالیت های پشتیبانی و کمکی حمل و نقل",
+    "66": "فعالیتهای پشتيباني و کمکي حمل و نقل",
+    "67": "اوراق تامین مالی",
+    "68": "صندوق سرمایه گذاری قابل معامله",
+    "69": "صندوق سرمایه گذاری در املاک و مستغلات",
+    "70": "اطلاعات و ارتباطات",
+    "71": "اوراق حق تقدم تسهیلات مسکن",
+    "72": "خدمات فنی و مهندسی",
+    "73": "فعالیتهای حرفه ای، علمی و فنی",
+    "74": "فعالیتهای جنبی واسطه گریهای مالی",
+    "82": "سایر فعالیت های خدماتی",
+    "90": "سایر فعالیتها",
+    "93": "مواد و محصولات دارویی",
+}
+
 def fetch_marketwatch():
     response = requests.get(
         URL,
@@ -93,7 +144,6 @@ def fetch_marketwatch():
     response.raise_for_status()
     data = response.json()
     return data["marketwatch"]
-
 
 def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -114,9 +164,12 @@ def main():
         if not ins_code or ins_code == "0":
             continue
 
-        symbol = row.get("lva")
+        symbol = normalize_symbol(row.get("lva"))
         if not symbol:
             symbol = ""
+
+        if symbol.endswith('3'):
+            continue
 
         name = row.get("lvc") or ""
         
@@ -136,11 +189,16 @@ def main():
             else:
                 continue
 
+        sector_code = str(row.get("csv", "")).strip()
+        sector_name = TSE_SECTORS.get(sector_code, f"گروه {sector_code}" if sector_code else "ناشناخته")
+
         instrument = {
             "ins_code": ins_code,
             "ins_id": ins_id,
             "symbol": normalize_symbol(symbol),
             "name": name,
+            "sector_code": sector_code,
+            "sector_name": sector_name,
             "market": market,
             "market_board": None, # Could map from cgrValCotTitle if available
             "isin": None,
@@ -169,20 +227,23 @@ def main():
         for inst in instruments:
             db_records.append((
                 inst['ins_code'], inst['ins_id'], inst['isin'], inst['symbol'], inst['name'],
+                inst['sector_code'], inst['sector_name'],
                 inst['market'], inst['market_board'], inst['instrument_type'],
                 1, now, now, now # active=1, created_at, updated_at, last_seen_at
             ))
             
         conn.executemany("""
             INSERT INTO instruments (
-                ins_code, ins_id, isin, symbol, name, market, market_board, instrument_type, 
+                ins_code, ins_id, isin, symbol, name, sector_code, sector_name, market, market_board, instrument_type, 
                 active, created_at, updated_at, last_seen_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(ins_code) DO UPDATE SET
                 ins_id = excluded.ins_id,
                 isin = excluded.isin,
                 symbol = excluded.symbol,
                 name = excluded.name,
+                sector_code = excluded.sector_code,
+                sector_name = excluded.sector_name,
                 market = excluded.market,
                 instrument_type = excluded.instrument_type,
                 active = 1,

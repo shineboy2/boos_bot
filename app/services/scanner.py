@@ -165,22 +165,22 @@ class ScannerService:
                 pattern_name = ""
                 
                 if latest['fvg_type'] == 'bullish':
-                    pattern_name = "🟢 شکاف ارزش صعودی (Bullish FVG)"
+                    pattern_name = "🟢 FVG"
                     has_pattern = True
                 elif latest['fvg_type'] == 'bearish':
-                    pattern_name = "🔴 شکاف ارزش نزولی (Bearish FVG)"
+                    pattern_name = "🔴 FVG"
                     has_pattern = True
                 elif latest['ob_type'] == 'bullish':
-                    pattern_name = "🟩 اردر بلاک صعودی (Bullish OB)"
+                    pattern_name = "🟩 OB"
                     has_pattern = True
                 elif latest['ob_type'] == 'bearish':
-                    pattern_name = "🟥 اردر بلاک نزولی (Bearish OB)"
+                    pattern_name = "🟥 OB"
                     has_pattern = True
                     
                 if has_pattern:
                     results.append({
                         'ins_code': ins_code,
-                        'symbol': latest['symbol'] + f" ({pattern_name})"
+                        'symbol': f"{latest['symbol']} | {pattern_name}"
                     })
                     
             res_df = pd.DataFrame(results)
@@ -261,3 +261,59 @@ class ScannerService:
         LIMIT 45
         """
         return self._execute_query(sql, "💰 ورود پول حقیقی هوشمند")
+
+    def scan_top_sectors(self) -> Dict:
+        """Scan for top performing sectors over the last month."""
+        from app.services.sector_analysis import SectorAnalysisService
+        try:
+            service = SectorAnalysisService()
+            df = service.get_sector_returns()
+            if df.empty:
+                return {"success": False, "title": "🏆 صنایع پیشتاز (یک ماهه)", "error": "No sector data"}
+            
+            # Sort by 1 month return
+            df = df.sort_values('1m_ret', ascending=False).head(15)
+            
+            # Format output: Symbol becomes Sector Name, and we format the return
+            df['symbol'] = df['sector_name']
+            df['ins_code'] = "0" # Dummy
+            df['symbol'] = df.apply(lambda x: f"{x['sector_name']} (+{x['1m_ret']*100:.1f}%)", axis=1)
+            
+            return {
+                "success": True,
+                "title": "🏆 صنایع پیشتاز (یک ماهه)",
+                "data": df[['ins_code', 'symbol']]
+            }
+        except Exception as e:
+            return {"success": False, "title": "🏆 صنایع پیشتاز (یک ماهه)", "error": str(e)}
+
+    def scan_lagging_stocks(self) -> Dict:
+        """Scan for stocks lagging their sectors by more than 10% in the last month."""
+        from app.services.sector_analysis import SectorAnalysisService
+        try:
+            service = SectorAnalysisService()
+            market_df = service.get_market_returns()
+            sector_df = service.get_sector_returns()
+            
+            if market_df.empty or sector_df.empty:
+                return {"success": False, "title": "📊 جامانده‌های گروه", "error": "No data"}
+            
+            # Merge
+            merged = market_df.merge(sector_df[['sector_name', '1m_ret']], on='sector_name', suffixes=('', '_sec'))
+            
+            # Condition: sector is positive, stock is lagging by at least 10%
+            # e.g., sector +15%, stock +2% -> diff = 13%
+            merged['diff'] = merged['1m_ret_sec'] - merged['1m_ret']
+            lagging = merged[(merged['1m_ret_sec'] > 0.05) & (merged['diff'] >= 0.10)].copy()
+            
+            lagging = lagging.sort_values('diff', ascending=False).head(45)
+            if not lagging.empty:
+                lagging['symbol'] = lagging.apply(lambda x: f"🐢 {x['symbol']} | اختلاف ۱ماهه: {x['diff']*100:.1f}%-", axis=1)
+                
+            return {
+                "success": True,
+                "title": "📊 جامانده‌های گروه‌های پیشتاز",
+                "data": lagging[['ins_code', 'symbol']]
+            }
+        except Exception as e:
+            return {"success": False, "title": "📊 جامانده‌های گروه", "error": str(e)}

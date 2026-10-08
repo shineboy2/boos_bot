@@ -68,30 +68,62 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         with db.connect() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT ins_code, symbol FROM instruments")
+            cur.execute("SELECT ins_code, symbol, sector_name FROM instruments")
             all_instruments = cur.fetchall()
         
         qt = normalize_symbol(text)
         
         row = None
-        for r_code, r_sym in all_instruments:
+        for r_code, r_sym, r_sec in all_instruments:
             norm_sym = r_sym.replace('ك', 'ک').replace('ي', 'ی')
             if norm_sym == qt:
-                row = (r_code, r_sym)
+                row = (r_code, r_sym, r_sec)
                 break
                 
         if not row:
-            for r_code, r_sym in all_instruments:
+            for r_code, r_sym, r_sec in all_instruments:
                 norm_sym = normalize_symbol(r_sym)
                 if qt in norm_sym:
-                    row = (r_code, r_sym)
+                    row = (r_code, r_sym, r_sec)
                     break
         
         if not row:
-            await status_msg.edit_text(f"❌ Symbol <b>{text}</b> not found in database.", parse_mode=ParseMode.HTML)
+            # Maybe it's a sector name?
+            sectors = list(set([r[2] for r in all_instruments if r[2] and r[2] != "ناشناخته"]))
+            matched_sec = None
+            for sec in sectors:
+                if qt in normalize_symbol(sec) or normalize_symbol(sec) in qt:
+                    matched_sec = sec
+                    break
+            
+            if matched_sec:
+                from app.services.sector_analysis import SectorAnalysisService
+                svc = SectorAnalysisService()
+                market_df = svc.get_market_returns()
+                if market_df.empty:
+                    await status_msg.edit_text("❌ No return data available.")
+                    return
+                sec_stocks = market_df[market_df['sector_name'] == matched_sec].sort_values('1m_ret', ascending=False).head(90)
+                
+                keyboard = []
+                row_btns = []
+                for _, r in sec_stocks.iterrows():
+                    sym_text = f"{r['symbol']} | {r['1m_ret']*100:+.1f}%"
+                    row_btns.append(InlineKeyboardButton(sym_text, callback_data=f"analyze_{r['ins_code']}"))
+                    if len(row_btns) == 3:
+                        keyboard.append(row_btns)
+                        row_btns = []
+                if row_btns:
+                    keyboard.append(row_btns)
+                    
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await status_msg.edit_text(f"🏢 <b>گروه: {matched_sec}</b>\nلیست نمادها به ترتیب بازدهی یک‌ماهه:", reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+                return
+
+            await status_msg.edit_text(f"❌ Symbol or Sector <b>{text}</b> not found in database.", parse_mode=ParseMode.HTML)
             return
                 
-        ins_code, symbol = row
+        ins_code, symbol, r_sec = row
         
         try:
             df = await fetch_api_data(ins_code)
@@ -157,17 +189,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         vol_alert = " 🚨 <b>(Suspicious Volume!)</b>" if suspicious_volume else ""
         avg_vol_str = f"{int(avg_volume_30d):,}"
         
+        sector_str = ""
+        if r_sec and r_sec != "ناشناخته":
+            try:
+                from app.services.sector_analysis import SectorAnalysisService
+                svc = SectorAnalysisService()
+                comp = svc.get_stock_comparison(ins_code)
+                if comp and comp.get('sector'):
+                    st = comp['stock']
+                    sc = comp['sector']
+                    s_ret = st['1m_ret'] * 100
+                    c_ret = sc['1m_ret'] * 100
+                    diff = s_ret - c_ret
+                    status = "🟢 بهتر از گروه" if diff > 0 else "🔴 ضعیف‌تر از گروه"
+                    sector_str = (
+                        f"\nــــــــــــــــــــــــــــــــــــــــ\n"
+                        f"🏢 <b>گروه:</b> {r_sec}\n"
+                        f"📈 <b>بازدهی یک‌ماهه سهم:</b> %{s_ret:+.1f}\n"
+                        f"📊 <b>بازدهی یک‌ماهه گروه:</b> %{c_ret:+.1f}\n"
+                        f"✅ <b>وضعیت (نسبت به گروه):</b> %{diff:+.1f} ({status})"
+                    )
+            except Exception as e:
+                print(f"Sector error: {e}")
+                pass
+
         msg = (
-            f"📊 <b>{symbol}</b> (Date: {date_str})\n\n"
-            f"💰 <b>Close:</b> {close_price:,} ({close_str})\n"
-            f"🏷️ <b>Last:</b> {last_price:,} ({last_str})\n"
-            f"📦 <b>Volume:</b> {volume:,}{vol_alert}\n"
-            f"📉 <b>30d Avg Vol:</b> {avg_vol_str}\n\n"
-            f"📈 <b>Indicators:</b>\n"
-            f"• <b>RSI (14):</b> {rsi}\n"
-            f"• <b>MACD Hist:</b> {macd_hist}\n"
-            f"• <b>Stoch %K:</b> {stoch_k}\n"
-            f"• <b>OBV:</b> {obv}"
+            f"🏢 <b>نماد:</b> {symbol}\n"
+            f"📅 <b>تاریخ:</b> {date_str}\n"
+            f"ــــــــــــــــــــــــــــــــــــــــ\n"
+            f"💰 <b>قیمت پایانی:</b> {close_price:,} ريال ({close_str})\n"
+            f"🏷️ <b>آخرین معامله:</b> {last_price:,} ريال ({last_str})\n"
+            f"📦 <b>حجم معاملات:</b> {volume:,}{vol_alert}\n"
+            f"📉 <b>میانگین حجم ماهانه:</b> {avg_vol_str}\n"
+            f"ــــــــــــــــــــــــــــــــــــــــ\n"
+            f"📈 <b>وضعیت اندیکاتورها:</b>\n"
+            f"🔸 <b>RSI (14):</b> {rsi}\n"
+            f"🔸 <b>MACD Hist:</b> {macd_hist}\n"
+            f"🔸 <b>Stoch %K:</b> {stoch_k}\n"
+            f"🔸 <b>OBV:</b> {obv}"
+            f"{sector_str}"
         )
         
         keyboard = [
@@ -213,6 +273,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result = scanner.scan_candles()
         elif data == "scan_real_money_flow":
             result = scanner.scan_real_money_flow()
+        elif data == "scan_top_sectors":
+            result = scanner.scan_top_sectors()
+        elif data == "scan_lagging_stocks":
+            result = scanner.scan_lagging_stocks()
             
         if not result.get("success"):
             await query.edit_message_text(f"❌ خطا در اجرای فیلتر: {result.get('error')}", parse_mode=ParseMode.HTML)
@@ -269,10 +333,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # EMA check
             df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
             ema50 = df.iloc[-1]['ema50']
-            ema_status = f"🟢 Price ({int(close):,}) > EMA 50 ({int(ema50):,})" if close > ema50 else f"🔴 Price ({int(close):,}) < EMA 50 ({int(ema50):,})"
+            ema_status = f"🟢 قیمت ({int(close):,}) بالاتر از میانگین ۵۰ روزه ({int(ema50):,})" if close > ema50 else f"🔴 قیمت ({int(close):,}) پایین‌تر از میانگین ۵۰ روزه ({int(ema50):,})"
             
             # Divergence string
-            div_str = "⚪ No bullish divergence detected today."
+            div_str = "⚪ واگرایی صعودی یافت نشد."
             if not signals_df.empty:
                 today_signals = signals_df[signals_df['signal_date'] == latest_date]
                 bullish_signals = today_signals[today_signals['divergence_type'].str.contains('bullish', case=False, na=False)]
@@ -289,22 +353,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             smc_str = ""
             if smc_data:
                 if smc_data.get('has_bullish_fvg'):
-                    smc_str += "🟢 Bullish FVG  "
+                    smc_str += "🟢 گپ صعودی (FVG)  "
                 if smc_data.get('has_bearish_fvg'):
-                    smc_str += "🔴 Bearish FVG  "
+                    smc_str += "🔴 گپ نزولی (FVG)  "
                 if smc_data.get('has_bullish_ob'):
-                    smc_str += "🟩 Bullish OB  "
+                    smc_str += "🟩 اوردر بلاک صعودی (OB)  "
                 if smc_data.get('has_bearish_ob'):
-                    smc_str += "🟥 Bearish OB  "
+                    smc_str += "🟥 اوردر بلاک نزولی (OB)  "
             
             if not smc_str:
-                smc_str = "⚪ No recent SMC patterns detected."
+                smc_str = "⚪ الگوی اسمارت مانی یافت نشد."
                 
             new_text = query.message.text + (
-                f"\n\n🔬 <b>Advanced Analysis (Live):</b>\n"
-                f"• <b>Trend (EMA 50):</b> {ema_status}\n"
-                f"• <b>Divergence:</b>\n  {div_str}\n"
-                f"• <b>Smart Money (SMC):</b>\n  {smc_str}\n"
+                f"\nــــــــــــــــــــــــــــــــــــــــ\n"
+                f"🔬 <b>تحلیل پیشرفته (لایو):</b>\n\n"
+                f"📌 <b>روند (EMA 50):</b>\n  {ema_status}\n\n"
+                f"🎯 <b>واگرایی‌ها:</b>\n  {div_str}\n\n"
+                f"🐋 <b>اسمارت مانی (SMC):</b>\n  {smc_str}\n"
             )
             
             await query.edit_message_text(text=new_text, parse_mode=ParseMode.HTML)
