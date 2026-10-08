@@ -68,13 +68,16 @@ class ScannerService:
             WHERE i.active = 1
             AND i.instrument_type = 'stock'
         )
-        SELECT ins_code, symbol FROM Ranked
+        SELECT ins_code, symbol, (volume / avg_vol) as ratio FROM Ranked
         WHERE date = (SELECT MAX(date) FROM ohlcv_daily)
         AND volume > 4 * avg_vol
         ORDER BY (volume / avg_vol) DESC
         LIMIT 45
         """
-        return self._execute_query(sql, "⚠️ حجم معاملات مشکوک")
+        res = self._execute_query(sql, "⚠️ حجم معاملات مشکوک")
+        if res.get("success") and res.get("data") is not None and not res["data"].empty:
+            res["data"]["symbol"] = res["data"].apply(lambda x: f"{x['symbol']} | {x['ratio']:.1f}x", axis=1)
+        return res
 
     def scan_candles(self) -> Dict:
         sql = """
@@ -250,7 +253,8 @@ class ScannerService:
 
     def scan_real_money_flow(self) -> Dict:
         sql = """
-        SELECT i.ins_code, i.symbol FROM instruments i
+        SELECT i.ins_code, i.symbol, (CAST(c.real_buy_value AS FLOAT) / CASE WHEN c.real_sell_value > 0 THEN c.real_sell_value ELSE 1 END) as ratio 
+        FROM instruments i
         JOIN client_type_daily c ON i.id = c.instrument_id
         JOIN ohlcv_daily o ON i.id = o.instrument_id AND o.date = c.date
         WHERE o.date = (SELECT MAX(date) FROM ohlcv_daily)
@@ -260,7 +264,10 @@ class ScannerService:
         ORDER BY (c.real_buy_value - c.real_sell_value) DESC
         LIMIT 45
         """
-        return self._execute_query(sql, "💰 ورود پول حقیقی هوشمند")
+        res = self._execute_query(sql, "💰 ورود پول حقیقی هوشمند")
+        if res.get("success") and res.get("data") is not None and not res["data"].empty:
+            res["data"]["symbol"] = res["data"].apply(lambda x: f"{x['symbol']} | قدرت: {x['ratio']:.1f}", axis=1)
+        return res
 
     def scan_top_sectors(self) -> Dict:
         """Scan for top performing sectors over the last month."""

@@ -165,17 +165,14 @@ def main():
             continue
 
         symbol = normalize_symbol(row.get("lva"))
-        if not symbol:
-            symbol = ""
-
-        if symbol.endswith('3'):
-            continue
-
         name = row.get("lvc") or ""
         
         # We classify everything, don't silently drop based on prefix/suffix anymore
         market = get_market_name(ins_id)
         inst_type = determine_instrument_type(ins_id, symbol, name)
+
+        if inst_type == 'stock' and (symbol.endswith('2') or symbol.endswith('3') or symbol.endswith('4')):
+            continue
         
         # User explicitly requested: "ببین من فقط نمادهای تابلو اول و دوم و فرابورس و باراز پایه رو میخوام. اختیار و این ها رو نمیخوام."
         # Allowed prefixes: 
