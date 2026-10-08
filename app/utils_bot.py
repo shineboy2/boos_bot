@@ -87,16 +87,26 @@ def format_signals_message(latest_date, signals_by_symbol):
     if confluence_signals:
         msg.append("⭐⭐⭐ <b>High Probability (Confluence)</b>")
         msg.append("<i>(Multiple indicators triggered on the same day)</i>")
+        count = 0
         for symbol, indicators in confluence_signals.items():
+            if count >= 40:
+                msg.append(f"<i>... و {len(confluence_signals) - 40} نماد دیگر</i>")
+                break
             inds_str = ", ".join(indicators)
             msg.append(f"🟢 <b>{symbol}</b>: {inds_str}")
+            count += 1
         msg.append("\n")
         
     if quality_signals:
         msg.append("⭐ <b>Quality Bullish Signals</b>")
         msg.append("<i>(Strong individual indicators: MACD & OBV)</i>")
+        count = 0
         for symbol, indicators in quality_signals.items():
+            if count >= 40:
+                msg.append(f"<i>... و {len(quality_signals) - 40} نماد دیگر</i>")
+                break
             msg.append(f"🔹 <b>{symbol}</b>: {indicators[0]}")
+            count += 1
         msg.append("\n")
         
     if not confluence_signals and not quality_signals:
