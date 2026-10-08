@@ -47,6 +47,8 @@ class DatabaseManager:
                 isin TEXT,
                 symbol TEXT NOT NULL,
                 name TEXT,
+                sector_code TEXT,
+                sector_name TEXT,
                 market TEXT,
                 market_board TEXT,
                 instrument_type TEXT,
@@ -233,6 +235,23 @@ class DatabaseManager:
             )
         """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instrument_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                total_score INTEGER NOT NULL,
+                divergence_score INTEGER DEFAULT 0,
+                volume_score INTEGER DEFAULT 0,
+                money_flow_score INTEGER DEFAULT 0,
+                smc_score INTEGER DEFAULT 0,
+                candle_score INTEGER DEFAULT 0,
+                reasons TEXT,
+                UNIQUE (instrument_id, date),
+                FOREIGN KEY (instrument_id) REFERENCES instruments(id)
+            )
+        """)
+
         conn.commit()
     
     def _migrate_schema(self, conn):
@@ -243,6 +262,8 @@ class DatabaseManager:
         # Check and add columns that may not exist in older databases
         migrations = [
             ("instruments", "instrument_type", "TEXT"),
+            ("instruments", "sector_code", "TEXT"),
+            ("instruments", "sector_name", "TEXT"),
             ("instruments", "instrument_status", "TEXT DEFAULT 'active'"),
             ("instruments", "last_seen_at", "TEXT"),
             ("ohlcv_daily", "yesterday", "REAL"),

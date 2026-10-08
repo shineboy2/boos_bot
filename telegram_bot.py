@@ -36,7 +36,7 @@ from app.utils import normalize_symbol
 from app.watchlist import WatchlistManager
 from app.chart_generator import generate_candlestick_chart
 from app.handlers.fetch_handlers import update_menu, handle_fetch_callback
-from app.handlers.commands import start, today, scan, filters_menu, watchlist_cmd, add_symbol_cmd, remove_symbol_cmd, marketmap_cmd, portfolio_cmd, close_trade_cmd
+from app.handlers.commands import start, today, scan, filters_menu, watchlist_cmd, add_symbol_cmd, remove_symbol_cmd, marketmap_cmd, portfolio_cmd, close_trade_cmd, top_cmd
 from app.data.provider import DataProvider
 from app.services.scanner import ScannerService
 from app.services.analysis import AnalysisService
@@ -413,6 +413,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("today", today))
     app.add_handler(CommandHandler("scan", scan))
     app.add_handler(CommandHandler("scans", filters_menu))
+    app.add_handler(CommandHandler("top", top_cmd))
     app.add_handler(CommandHandler("watchlist", watchlist_cmd))
     app.add_handler(CommandHandler("portfolio", portfolio_cmd))
     app.add_handler(CommandHandler("add", add_symbol_cmd))

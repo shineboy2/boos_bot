@@ -207,6 +207,9 @@ def main():
                 print(f"Cleaned {old_count} signals older than 180 days.")
 
     # Update pipeline run record
+    from app.confluence import generate_daily_scores
+    generate_daily_scores(db)
+
     with db.connect() as conn:
         status = 'success' if failed == 0 else ('partial' if success > 0 else 'failed')
         conn.execute("""

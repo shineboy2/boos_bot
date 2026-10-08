@@ -153,6 +153,68 @@ async def marketmap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await msg.edit_text(f"❌ خطا در رسم نقشه بازار: {e}")
 
+@restricted
+async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("Fetching top confluence signals from database...", parse_mode=ParseMode.HTML)
+    
+    with db.connect() as conn:
+        latest_date = conn.execute("SELECT MAX(date) FROM ohlcv_daily").fetchone()[0]
+        if not latest_date:
+            await msg.edit_text("دیتای بازار هنوز دریافت نشده است.")
+            return
+            
+        query = """
+            SELECT i.symbol, d.total_score, d.reasons
+            FROM daily_scores d
+            JOIN instruments i ON d.instrument_id = i.id
+            WHERE d.date = ? AND d.total_score >= 40
+            ORDER BY d.total_score DESC
+            LIMIT 20
+        """
+        rows = conn.execute(query, (latest_date,)).fetchall()
+        
+    if not rows:
+        await msg.edit_text(f"در تاریخ {latest_date} هیچ سهمی حداقل امتیاز ۴۰ برای سیگنال جامع را کسب نکرده است.")
+        return
+        
+    import json
+    text = f"💎 <b>بهترین فرصت‌های جامع بازار (Confluence)</b>\nتاریخ: {latest_date}\n\n"
+    
+    for row in rows:
+        symbol = row['symbol']
+        score = row['total_score']
+        reasons = json.loads(row['reasons'])
+        
+        text += f"🏆 <b>{symbol}</b> (امتیاز: {score})\n"
+        for r in reasons:
+            text += f"   ✅ <i>{r}</i>\n"
+        text += "\n"
+        
+    text += "<i>* سهم‌هایی که بیشترین پارامترهای مثبت را همزمان داشته‌اند.</i>"
+    
+    # Chunking logic for safety (though 20 items should fit)
+    chunk_size = 4000
+    if len(text) <= chunk_size:
+        await msg.edit_text(text, parse_mode=ParseMode.HTML)
+    else:
+        await msg.delete()
+        parts = []
+        current_part = ""
+        for line in text.split('\n'):
+            if len(current_part) + len(line) + 1 > chunk_size:
+                parts.append(current_part)
+                current_part = line + '\n'
+            else:
+                current_part += line + '\n'
+        if current_part:
+            parts.append(current_part)
+            
+        for i, part in enumerate(parts):
+            if i == 0:
+                await update.message.reply_text(part, parse_mode=ParseMode.HTML)
+            else:
+                await update.message.reply_text(f"(ادامه...)\n\n{part}", parse_mode=ParseMode.HTML)
+
 from app.portfolio import PortfolioManager
 portfolio = PortfolioManager()
 
