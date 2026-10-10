@@ -16,6 +16,7 @@ def generate_candlestick_chart(df: pd.DataFrame, symbol: str, output_path: str =
         
     # Drop rows where 'open', 'high', 'low', 'close', 'volume' are missing to avoid mplfinance errors
     df.dropna(subset=['open', 'high', 'low', 'close', 'volume'], inplace=True)
+    df = df[(df['close'] > 0) & (df['volume'] > 0)]
         
     df.set_index('date', inplace=True)
     df = df.tail(150)

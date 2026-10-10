@@ -18,8 +18,9 @@ class DataFetcherService:
     
     async def update_today_prices(self) -> int:
         """Update closing info for all active instruments."""
-        # For simplicity in this iteration, we just update the daily history for active ones, 
-        # or we could specifically hit GetClosingPriceInfo. We'll use CDN's closing_info endpoint.
+        from datetime import datetime
+        now_iran = datetime.now() 
+        today_date = now_iran.strftime('%Y-%m-%d')
         
         with self.db.connect() as conn:
             cur = conn.execute("SELECT ins_code FROM instruments WHERE active = 1")
@@ -39,11 +40,22 @@ class DataFetcherService:
             
             for code, result in zip(chunk, results):
                 if isinstance(result, dict) and result:
-                    # Upsert this into DB. Here we just rely on get_ohlcv to do normal fetch if missing
-                    # but since this is `today`, we could construct a 1-row canonical record.
-                    # For phase 2, we just count them. Phase 4 will do exact UPSERT for today.
-                    success_count += 1
-                    
+                    live_vol = int(result.get("qTotTran5J") or 0)
+                    if live_vol > 0:
+                        canonical_row = {
+                            "date": today_date,
+                            "open": float(result.get("priceFirst") or 0),
+                            "high": float(result.get("priceMax") or 0),
+                            "low": float(result.get("priceMin") or 0),
+                            "close": float(result.get("pClosing") or 0),
+                            "last": float(result.get("pDrCotVal") or 0),
+                            "volume": live_vol,
+                            "value": float(result.get("qTotCap") or 0),
+                            "trade_count": int(result.get("zTotTran") or 0),
+                        }
+                        self.provider._upsert_ohlcv_batch(code, [canonical_row])
+                        success_count += 1
+                        
         return success_count
         
     async def fetch_all_history(self, progress_callback: Callable[[int, int], None] = None) -> Tuple[int, int]:

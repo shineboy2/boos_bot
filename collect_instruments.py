@@ -16,23 +16,7 @@ from app.utils import normalize_symbol
 DATA_DIR = BASE_DIR / "data"
 OUTPUT_FILE = DATA_DIR / "instruments.json"
 
-URL = (
-    "https://cdn.tsetmc.com/api/ClosingPrice/"
-    "GetMarketWatch"
-    "?market=0"
-    "&paperTypes[0]=1"
-    "&paperTypes[1]=2"
-    "&paperTypes[2]=3"
-    "&paperTypes[3]=4"
-    "&paperTypes[4]=5"
-    "&paperTypes[5]=6"
-    "&paperTypes[6]=7"
-    "&paperTypes[7]=8"
-    "&paperTypes[8]=9"
-    "&withBestLimits=false"
-    "&hEven=0"
-    "&RefID=0"
-)
+URL = "http://old.tsetmc.com/tsev2/data/MarketWatchPlus.aspx"
 
 from config import DEFAULT_HEADERS
 HEADERS = DEFAULT_HEADERS
@@ -104,7 +88,7 @@ TSE_SECTORS = {
     "39": "شرکت های چند رشته ای صنعتی",
     "40": "عرضه برق، گاز، بخار و آب گرم",
     "42": "ساخت رادیو، تلویزیون و دستگاه‌ها و وسایل ارتباطی",
-    "43": "انبوه سازی، املاک و مستغلات",
+    "43": "مواد و محصولات دارویی",
     "44": "محصولات شیمیایی",
     "45": "پیمانکاری صنعتی",
     "47": "تجارت خرده فروشی",
@@ -125,11 +109,11 @@ TSE_SECTORS = {
     "67": "اوراق تامین مالی",
     "68": "صندوق سرمایه گذاری قابل معامله",
     "69": "صندوق سرمایه گذاری در املاک و مستغلات",
-    "70": "اطلاعات و ارتباطات",
+    "70": "انبوه سازی، املاک و مستغلات",
     "71": "اوراق حق تقدم تسهیلات مسکن",
     "72": "خدمات فنی و مهندسی",
     "73": "فعالیتهای حرفه ای، علمی و فنی",
-    "74": "فعالیتهای جنبی واسطه گریهای مالی",
+    "74": "اطلاعات و ارتباطات",
     "82": "سایر فعالیت های خدماتی",
     "90": "سایر فعالیتها",
     "93": "مواد و محصولات دارویی",
@@ -138,12 +122,31 @@ TSE_SECTORS = {
 def fetch_marketwatch():
     response = requests.get(
         URL,
-        headers=HEADERS,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         timeout=30,
     )
     response.raise_for_status()
-    data = response.json()
-    return data["marketwatch"]
+    
+    # Format: id,insCode,lva,lvc,nv,pc,pcc,plc,tvol,tval,eps,pe,cs,csv;...
+    text = response.text
+    rows = []
+    
+    parts = text.split(';')
+    for part in parts:
+        if not part:
+            continue
+        fields = part.split(',')
+        if len(fields) >= 19:
+            row = {
+                "insCode": fields[0],
+                "insID": fields[1],
+                "lva": fields[2],
+                "lvc": fields[3],
+                "cs": fields[18], # Sector code is index 18 in MarketWatchPlus
+            }
+            rows.append(row)
+            
+    return rows
 
 def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -186,7 +189,7 @@ def main():
             else:
                 continue
 
-        sector_code = str(row.get("csv", "")).strip()
+        sector_code = str(row.get("cs", "")).strip()
         sector_name = TSE_SECTORS.get(sector_code, f"گروه {sector_code}" if sector_code else "ناشناخته")
 
         instrument = {
